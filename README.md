@@ -1,6 +1,6 @@
 # ROG RTX 3080M UEFI Unlock
 
-> **Experimental Lenovo branch:** See [Lenovo 82K6 dGPU-only Windows takeover](LENOVO-82K6-EXPERIMENT.md) for its distinct hardware path, one-machine result, limits, and excluded private fixture. The original ASUS instructions below do not describe the Lenovo experiment.
+> **Experimental Lenovo 82K6 branch:** Verified on one machine with **dGPU-only display and automatic boot/unlock from the internal drive: no hybrid mode, USB drive or U key**. A restart after configuring persistent startup succeeded. [Hardware, evidence and limitations](LENOVO-82K6-EXPERIMENT.md). The original ASUS instructions below do not describe the Lenovo experiment.
 
 Experimental **SS0-only** Tensor Core throughput unlock before Windows boots. Verified on one ASUS ROG Strix G533QS with RTX 3080 Laptop 16GB (GA104M).
 
