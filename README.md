@@ -1,6 +1,18 @@
-# ROG RTX 3080M UEFI Unlock
+# RTX 3080 Laptop UEFI Unlock: Lenovo dGPU-only experiment
 
 > **Experimental Lenovo 82K6 branch:** Verified on one machine with **dGPU-only display and automatic boot/unlock from the internal drive: no hybrid mode, USB drive or U key**. A restart after configuring persistent startup succeeded. [Hardware, evidence and limitations](LENOVO-82K6-EXPERIMENT.md). The original ASUS instructions below do not describe the Lenovo experiment.
+
+[中文实验记录](LENOVO-82K6-EXPERIMENT.zh-CN.md) · [Full Lenovo report](LENOVO-82K6-EXPERIMENT.md)
+
+## Lenovo result at a glance
+
+- **Computer:** Lenovo Legion 82K6 / Y9000K 2021H, BIOS H1CN58WW, Windows 11.
+- **GPU:** RTX 3080 Laptop 16 GB, GA104M, PCI `10de:24dc`, subsystem `17aa:3f84`, VBIOS `94.04.4f.00.1a`.
+- **Startup:** firmware dGPU-only mode, direct NVIDIA panel output, automatic unlock from the internal EFI partition; no hybrid mode, USB drive, boot-menu selection or U key during ordinary startup. One restart after configuring the persistent boot order has succeeded.
+- **Same-environment GEMM:** FP16 38.51 → 55.24 TFLOPS (+43.44%); BF16 37.87 → 53.05 TFLOPS (+40.08%). These are single-run synthetic measurements, not application benchmarks.
+- **Scope:** experimental source for the tested machine; the branch does not include a general installer. Sleep/hibernate, cold boot and long-term stability are untested.
+
+## Original ASUS project
 
 Experimental **SS0-only** Tensor Core throughput unlock before Windows boots. Verified on one ASUS ROG Strix G533QS with RTX 3080 Laptop 16GB (GA104M).
 
