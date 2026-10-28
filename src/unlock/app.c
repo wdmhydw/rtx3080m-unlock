@@ -4,6 +4,10 @@
 #include "checks.h"
 #include "sha256.h"
 #include "ownership.h"
+#ifdef GU_LENOVO_SINGLE_OWNER
+#include "single_owner.h"
+static GU_SINGLE_OWNER_PLAN SingleOwnerPlan;
+#endif
 #include "../probe/gpu_family.h"
 #include "vendor/unlock_610.h"
 #include "vendor/gfw_eval.h"
@@ -75,6 +79,9 @@ static BOOLEAN DisplayCheck(VOID) {
   BOOLEAN valid = TRUE;
   EFI_GRAPHICS_OUTPUT_MODE_INFORMATION physical = {0}, forwarded = {0};
   BOOLEAN forwarding = FALSE;
+  EFI_GRAPHICS_OUTPUT_MODE_INFORMATION mirrored = {0};
+  EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE physical_mode = {0}, mirror_mode = {0};
+  BOOLEAN mirroring = FALSE;
   EFI_STATUS status = Gu.bs->LocateHandleBuffer(ByProtocol, &GopGuid, NULL, &count, &handles);
   GuLog("GOP enumeration: status=%#llx handles=%zu\n", (unsigned long long)status, (size_t)count);
   if (EFI_ERROR(status) || !handles || !count || count > 16) {
@@ -106,9 +113,26 @@ static BOOLEAN DisplayCheck(VOID) {
           (unsigned)i, (unsigned long long)status, route, (unsigned long long)mode->FrameBufferBase,
           (size_t)mode->FrameBufferSize, mode->Mode, mode->MaxMode, (size_t)mode->SizeOfInfo,
           (unsigned)(handles[i] == Table->ConsoleOutHandle));
+    /* EDK2 ConSplitter may expose the sole physical GOP's framebuffer on the
+       pathless system console. Defer acceptance until its complete mode and
+       framebuffer match exactly one independently validated physical GOP. */
+    if ((status == EFI_UNSUPPORTED || status == EFI_NOT_FOUND) && !path &&
+        handles[i] == Table->ConsoleOutHandle && mode->FrameBufferBase && mode->FrameBufferSize &&
+        mode->Info && mode->SizeOfInfo >= sizeof(*mode->Info) && mode->MaxMode &&
+        mode->Mode < mode->MaxMode && !mirroring && !forwarding) {
+      mirrored = *mode->Info;
+      mirror_mode = *mode;
+      mirroring = TRUE;
+      GopInfoLog(i, &mirrored);
+      continue;
+    }
     if ((status == EFI_UNSUPPORTED || status == EFI_NOT_FOUND) && !path && !mode->FrameBufferBase &&
         !mode->FrameBufferSize) {
       EFI_GRAPHICS_OUTPUT_MODE_INFORMATION info;
+      if (mirroring && handles[i] == Table->ConsoleOutHandle) {
+        valid = FALSE;
+        break;
+      }
       if (ConsoleGopCheck(gop, i, &info)) {
         if (info.PixelFormat == PixelBltOnly) continue;
         /* EDK2 ConSplitter forwards QueryMode to its sole physical GOP. Accept
@@ -138,7 +162,24 @@ static BOOLEAN DisplayCheck(VOID) {
       break;
     }
     physical = *mode->Info;
+    physical_mode = *mode;
     intel++;
+  }
+  if (mirroring) {
+    BOOLEAN match = intel == 1 && !forwarding && mirrored.Version == physical.Version &&
+                    mirrored.PixelFormat == physical.PixelFormat &&
+                    !memcmp(&mirrored.PixelInformation, &physical.PixelInformation,
+                            sizeof(mirrored.PixelInformation)) &&
+                    mirrored.HorizontalResolution == physical.HorizontalResolution &&
+                    mirrored.VerticalResolution == physical.VerticalResolution &&
+                    mirrored.PixelsPerScanLine == physical.PixelsPerScanLine &&
+                    mirror_mode.FrameBufferBase == physical_mode.FrameBufferBase &&
+                    mirror_mode.FrameBufferSize == physical_mode.FrameBufferSize &&
+                    mirror_mode.SizeOfInfo == physical_mode.SizeOfInfo &&
+                    mirror_mode.Mode == physical_mode.Mode &&
+                    mirror_mode.MaxMode == physical_mode.MaxMode;
+    GuLog("GOP console framebuffer mirror match=%u\n", match);
+    valid = valid && match;
   }
   if (forwarding) {
     BOOLEAN match = intel == 1 && forwarded.Version == physical.Version &&
@@ -472,6 +513,9 @@ BOOLEAN GuPhase(const char *phase) {
   return TRUE;
 }
 EFI_STATUS GxPrepare(GC_CONTEXT *c) {
+#ifdef GU_LENOVO_SINGLE_OWNER
+  memset(&SingleOwnerPlan, 0, sizeof(SingleOwnerPlan));
+#endif
   Table = c->table;
   GuInit(Table->BootServices, c->pci);
   Gu.image = c->image;
@@ -588,23 +632,48 @@ EFI_STATUS GxFinish(VOID) {
   PatchIo = FALSE;
   return GuIoClose();
 }
-/* This path requires a display independent of the compute target and no active
-   target owner. It never disconnects a firmware driver or changes a GOP mode. */
+/* The default path requires an unbound compute target. The local Lenovo build
+   can release one preflighted owner after U. Both preserve the independent GOP. */
 static BOOLEAN IndependentIsolated(VOID) {
   return DisplayCheck() && GuControllerIdle(TRUE);
 }
 EFI_STATUS GxIndependentPrepare(GC_CONTEXT *c) {
+#ifdef GU_LENOVO_SINGLE_OWNER
+  if (c != PhaseContext || !PatchIo || PreservedSs1 > 15 || !DisplayCheck())
+    return EFI_ACCESS_DENIED;
+  EFI_STATUS prepared = GuSingleOwnerPrepare(Table, &SingleOwnerPlan);
+  if (EFI_ERROR(prepared)) return prepared;
+  return c->log("INDEPENDENT_READY: separate display; single-owner plan verified; "
+                "SS1=%#x preserved\n", PreservedSs1) ? EFI_SUCCESS : EFI_DEVICE_ERROR;
+#else
   if (c != PhaseContext || !PatchIo || PreservedSs1 > 15 ||
       !DisplayCheck() || !GuControllerIdle(FALSE))
     return EFI_ACCESS_DENIED;
   return c->log("INDEPENDENT_READY: separate display; target unbound; SS1=%#x preserved\n",
                 PreservedSs1) ? EFI_SUCCESS : EFI_DEVICE_ERROR;
+#endif
 }
 EFI_STATUS GxIndependentRun(GC_CONTEXT *c, GC_RESULT *r) {
   memset(r, 0, sizeof(*r));
+#ifdef GU_LENOVO_SINGLE_OWNER
+  if (c != PhaseContext || !PatchIo || PreservedSs1 > 15 || !DisplayCheck())
+    return EFI_ACCESS_DENIED;
+  EFI_STATUS s = ConfigCheck(FALSE);
+  if (!EFI_ERROR(s)) s = BarCheck();
+  if (!EFI_ERROR(s)) s = ColdCheck();
+  if (!EFI_ERROR(s)) s = PromCheck();
+  if (EFI_ERROR(s) || !GuLogReady()) return EFI_ERROR(s) ? s : EFI_DEVICE_ERROR;
+  s = GuSingleOwnerRelease(Table, &SingleOwnerPlan, &r->touched, &r->detach);
+  if (EFI_ERROR(s)) return s;
+  if (!DisplayCheck()) return EFI_ACCESS_DENIED;
+#else
   EFI_STATUS s = GxIndependentPrepare(c);
   if (EFI_ERROR(s)) return s;
+#endif
   r->claim = GuClaimController();
+#ifdef GU_LENOVO_SINGLE_OWNER
+  r->touched = r->touched || Gu.owned;
+#endif
   if (EFI_ERROR(r->claim)) return r->claim;
   r->touched = TRUE;
   s = GxPatch(IndependentIsolated);

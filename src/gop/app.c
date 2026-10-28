@@ -37,6 +37,26 @@
 #define GC_DIAG "v8-virtual-gop"
 #define GC_DIAG_WIDE L"v8-virtual-gop"
 #endif
+#elif defined(GC_LENOVO_CYCLE)
+#include "lenovo_cycle.h"
+#include "windows.h"
+#ifdef GC_LENOVO_UNLOCK
+#include "patch.h"
+#include "../unlock/runtime_profile.h"
+#if defined(GC_LENOVO_WINDOWS_TAKEOVER)
+#define GC_DIAG "local-lenovo-windows-takeover-12"
+#define GC_DIAG_WIDE L"local-lenovo-windows-takeover-12"
+#elif defined(GC_LENOVO_AUTOSTART)
+#define GC_DIAG "local-lenovo-dgpu-auto-unlock-11"
+#define GC_DIAG_WIDE L"local-lenovo-dgpu-auto-unlock-11"
+#else
+#define GC_DIAG "local-lenovo-dgpu-unlock-10"
+#define GC_DIAG_WIDE L"local-lenovo-dgpu-unlock-10"
+#endif
+#else
+#define GC_DIAG "local-lenovo-dgpu-isolation-9"
+#define GC_DIAG_WIDE L"local-lenovo-dgpu-isolation-9"
+#endif
 #elif defined(GC_LEAF_ONLY)
 #include "leaf.h"
 #define GC_DIAG "v5-leaf"
@@ -50,6 +70,38 @@
 #define GC_DIAG_WIDE L"v3"
 #endif
 #include "../unlock/format.h"
+#ifdef GC_LENOVO_DGPU_DIAG
+#if !defined(GC_TREE_ONLY) || !defined(GU_SSD_EXPERIMENT) || defined(GC_FULL_UNLOCK)
+#error Lenovo dGPU diagnostic must be a tree-only build with disk boot support.
+#endif
+#include "dgpu_diagnostic.h"
+#undef GC_DIAG
+#undef GC_DIAG_WIDE
+#define GC_DIAG "local-lenovo-dgpu-diagnostic-5"
+#define GC_DIAG_WIDE L"local-lenovo-dgpu-diagnostic-5"
+#endif
+#ifdef GC_PREFLIGHT_ONLY
+#include "owner_diagnostic.h"
+#undef GC_DIAG
+#undef GC_DIAG_WIDE
+#define GC_DIAG "local-lenovo-owner-preflight-2"
+#define GC_DIAG_WIDE L"local-lenovo-owner-preflight-2"
+#endif
+#ifdef GU_LENOVO_SINGLE_OWNER
+#undef GC_DIAG
+#undef GC_DIAG_WIDE
+#define GC_DIAG "local-lenovo-single-owner-3"
+#define GC_DIAG_WIDE L"local-lenovo-single-owner-3"
+#endif
+#ifdef GU_LENOVO_AUTOSTART
+#if !defined(GU_LENOVO_SINGLE_OWNER) || !defined(GU_AUTO_PROFILE)
+#error Local autostart requires the qualified single-owner and runtime-profile build.
+#endif
+#undef GC_DIAG
+#undef GC_DIAG_WIDE
+#define GC_DIAG "local-lenovo-autostart-4"
+#define GC_DIAG_WIDE L"local-lenovo-autostart-4"
+#endif
 #include <Protocol/LoadedImage.h>
 #include <Protocol/DevicePath.h>
 #include <Protocol/SimpleFileSystem.h>
@@ -60,6 +112,9 @@ static EFI_SYSTEM_TABLE *Table;
 static EFI_FILE_PROTOCOL *Report;
 static UINTN RunSlot;
 static BOOLEAN LogFailed, Quiet;
+#ifdef GU_LENOVO_AUTOSTART
+static BOOLEAN AutomaticApproval;
+#endif
 #ifdef GU_AUTO_PROFILE
 static BOOLEAN ProfileChanged;
 #endif
@@ -105,7 +160,15 @@ static VOID ShowFailure(const char *stage, EFI_STATUS status) {
   Say(name);
   Say(L"\r\nStatus: ");
   Say(number);
+#if defined(GC_LENOVO_CYCLE) && !defined(GC_LENOVO_UNLOCK)
+  Say(L"Check RTX-CYCLE/RUNnn/GOP.TXT.\r\n"
+      L"Select Windows Boot Manager to boot normally.\r\n"
+#elif defined(GC_LENOVO_DGPU_DIAG)
+  Say(L"Check RTX-DIAG/RUNnn/GOP.TXT.\r\n"
+      L"Select Windows Boot Manager to boot normally.\r\n"
+#else
   Say(L"Check RTX-UNLOCK/RUNnn/GOP.TXT and UNLOCK.TXT.\r\n"
+#endif
       L"For log failure, copy the entire package including RTX-UNLOCK.\r\n"
 #ifdef GU_RUNTIME_PROFILE_BUILD
       L"PROFILE.BIN must be valid in RTX-UNLOCK on this EFI volume.\r\n"
@@ -137,7 +200,15 @@ static EFI_STATUS OpenParent(EFI_HANDLE image, EFI_FILE_PROTOCOL **out) {
   if (EFI_ERROR(status) || !fs) return EFI_NOT_FOUND;
   status = fs->OpenVolume(fs, &root);
   if (EFI_ERROR(status) || !root) return EFI_NOT_FOUND;
-  status = root->Open(root, &parent, L"\\RTX-UNLOCK", EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0);
+  status = root->Open(root, &parent,
+#if defined(GC_LENOVO_CYCLE) && !defined(GC_LENOVO_UNLOCK)
+                      L"\\RTX-CYCLE",
+#elif defined(GC_LENOVO_DGPU_DIAG)
+                      L"\\RTX-DIAG",
+#else
+                      L"\\RTX-UNLOCK",
+#endif
+                      EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0);
   status = CloseFile(root, status);
   if (EFI_ERROR(status)) return CloseFile(parent, status);
   if (!parent) return EFI_NOT_FOUND;
@@ -214,6 +285,31 @@ static EFI_STATUS OpenLog(EFI_HANDLE image) {
   if (!EFI_ERROR(status) && !Report) status = EFI_DEVICE_ERROR;
   return CloseFile(run, status);
 }
+#ifdef GC_LENOVO_WINDOWS_TAKEOVER
+/* Preserve a returned StartImage status without accessing the detached console. */
+static VOID RecordWindowsReturn(EFI_HANDLE image, EFI_STATUS returned) {
+  if (LogFailed || Quiet || Report || RunSlot >= 100) return;
+  EFI_FILE_PROTOCOL *parent = NULL, *run = NULL;
+  EFI_STATUS s = OpenParent(image, &parent);
+  CHAR16 name[] = L"RUN00";
+  name[3] = (CHAR16)('0' + RunSlot / 10);
+  name[4] = (CHAR16)('0' + RunSlot % 10);
+  if (!EFI_ERROR(s))
+    s = parent->Open(parent, &run, name, EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0);
+  s = CloseFile(parent, s);
+  if (!EFI_ERROR(s) && run)
+    s = run->Open(run, &Report, L"GOP.TXT", EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0);
+  s = CloseFile(run, s);
+  if (!EFI_ERROR(s) && Report && Report->SetPosition)
+    s = Report->SetPosition(Report, MAX_UINT64);
+  else
+    s = EFI_DEVICE_ERROR;
+  if (!EFI_ERROR(s))
+    Log("WINDOWS_RETURN status=%#llx no_OS_handoff=1\n", (unsigned long long)returned);
+  CloseFile(Report, s);
+  Report = NULL;
+}
+#endif
 static EFI_STATUS Target(GC_CONTEXT *c) {
   EFI_HANDLE *handles = NULL;
   UINTN count = 0, matches = 0;
@@ -253,6 +349,30 @@ static EFI_STATUS Target(GC_CONTEXT *c) {
 }
 #ifndef GC_TREE_ONLY
 static EFI_STATUS Approve(VOID) {
+#ifdef GC_LENOVO_AUTOSTART
+#if !defined(GC_LENOVO_UNLOCK) || !defined(GU_RUNTIME_PROFILE_BUILD)
+#error Automatic Lenovo dGPU unlock requires the verified profile and real unlock build.
+#endif
+#ifdef GC_LENOVO_WINDOWS_TAKEOVER
+  return Say(L"AUTO UNLOCK: Windows will restore the display. The screen will be black during "
+             L"handoff.\r\n");
+#else
+  return Say(L"LENOVO AUTO UNLOCK: checks passed; starting once.\r\n");
+#endif
+#else
+#ifdef GC_LENOVO_CYCLE
+  if (!Table->ConIn || !Table->ConIn->Reset || !Table->ConIn->ReadKeyStroke) return EFI_UNSUPPORTED;
+#endif
+#ifdef GU_LENOVO_AUTOSTART
+  AutomaticApproval = FALSE;
+  /* Explicit local install policy: ordinary boots need no keyboard input.
+     A changed PROM still follows the existing physical-U replacement gate. */
+  if (!ProfileChanged) {
+    EFI_STATUS automatic = Say(L"LOCAL LENOVO AUTO: checks passed; proceeding once.\r\n");
+    if (!EFI_ERROR(automatic)) AutomaticApproval = TRUE;
+    return automatic;
+  }
+#endif
 #ifdef GC_PRODUCTION
   if (Quiet
 #ifdef GU_INDEPENDENT_DISPLAY
@@ -276,9 +396,25 @@ static EFI_STATUS Approve(VOID) {
   EFI_STATUS status = Table->ConIn->Reset(Table->ConIn, FALSE);
   if (EFI_ERROR(status)) return status;
   status = Say(
-#ifdef GC_FULL_FLR
+#ifdef GC_LENOVO_CYCLE
+#ifdef GC_LENOVO_UNLOCK
+      L"LENOVO dGPU UNLOCK: release display, unlock SS0 once, preserve SS1; one FLR.\r\n"
+      L"Then restore display and start Windows automatically without reboot.\r\n"
+#else
+      L"LENOVO dGPU: release four qualified display driver roles, then restore them.\r\n"
+#ifdef GC_LENOVO_VIRTUAL_RELEASE
+      L"Test virtual display removal/restoration and exclusive PCI access. No unlock or FLR.\r\n"
+#else
+      L"No unlock or FLR. If isolation is declined, attempt verified display recovery only.\r\n"
+#endif
+#endif
+#elif defined(GC_FULL_FLR)
 #ifdef GC_FULL_UNLOCK
 #ifdef GU_INDEPENDENT_DISPLAY
+#ifdef GU_LENOVO_SINGLE_OWNER
+      L"LOCAL LENOVO EXPERIMENT: U releases one verified NVIDIA firmware driver.\r\n"
+      L"Recheck display, PCI, cold state and PROM; unlock only if all checks pass.\r\n"
+#endif
       L"Independent display verified. Unlock NVIDIA SS0 once; preserve SS1; one FLR.\r\n"
       L"Display GOP remains attached. Press U only for this one attempt.\r\n"
 #else
@@ -301,7 +437,7 @@ static EFI_STATUS Approve(VOID) {
 #else
       L"One NVIDIA display device. GOP driver Stop/Start may change GPU state.\r\n"
 #endif
-#ifndef GC_FULL_FLR
+#if !defined(GC_FULL_FLR) && !defined(GC_LENOVO_UNLOCK)
       L"No unlock, FLR or direct register writes are linked.\r\n"
 #endif
 #ifdef GC_WINDOWS_HANDOFF
@@ -330,6 +466,7 @@ static EFI_STATUS Approve(VOID) {
     Table->BootServices->Stall(100000);
   }
   return EFI_TIMEOUT;
+#endif
 }
 static VOID Halt(VOID) {
   /* No stale console access or automatic boot continuation after uncertain recovery. */
@@ -343,6 +480,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *table) {
   Report = NULL;
   LogFailed = FALSE;
   Quiet = FALSE;
+#ifdef GU_LENOVO_AUTOSTART
+  AutomaticApproval = FALSE;
+#endif
 #ifdef GU_AUTO_PROFILE
   ProfileChanged = FALSE;
 #endif
@@ -354,7 +494,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *table) {
   GW_PLAN windows = {0};
 #endif
 #ifndef GC_TREE_ONLY
-#ifdef GC_FULL_FLR
+#ifdef GC_LENOVO_CYCLE
+  LC_PLAN *approved = NULL;
+#elif defined(GC_FULL_FLR)
   GF_PLAN *approved = NULL;
 #elif defined(GC_LEAF_ONLY)
   GL_PLAN approved;
@@ -382,26 +524,43 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *table) {
   context.quiet = Quiet;
   context.run_slot = RunSlot;
   /* Persist entry before the first console call, including a failing console. */
-  if (!Log(
-          "ENTRY: GOP diagnostic " GC_DIAG "; mode="
-#ifdef GC_TREE_ONLY
-          "read-only ownership tree; no driver Start/Stop, exclusive access, unlock or FLR linked\n"
+  if (!Log("ENTRY: GOP diagnostic " GC_DIAG "; mode="
+#ifdef GC_LENOVO_CYCLE
+#ifdef GC_LENOVO_UNLOCK
+#ifdef GC_LENOVO_WINDOWS_TAKEOVER
+           "Lenovo dGPU display release; SS0-only unlock; SS1 preserved; one FLR; Windows display "
+           "takeover\n"
+#else
+           "Lenovo dGPU display release; SS0-only unlock; SS1 preserved; one FLR; display "
+           "recovery\n"
+#endif
+#else
+#ifdef GC_LENOVO_VIRTUAL_RELEASE
+           "qualified display release, ownerless virtual GOP withdrawal and restoration; no unlock "
+           "or GPU reset\n"
+#else
+           "qualified four-role display release/recovery; no unlock or GPU reset\n"
+#endif
+#endif
+#elif defined(GC_TREE_ONLY)
+           "read-only ownership tree; no driver Start/Stop, exclusive access, unlock or FLR "
+           "linked\n"
 #else
 #ifdef GC_FULL_FLR
 #ifdef GC_FULL_UNLOCK
-          "independent display, unbound NVIDIA, SS0-only unlock, SS1 preserved, one FLR\n"
+           "independent display, unbound NVIDIA, SS0-only unlock, SS1 preserved, one FLR\n"
 #else
-          "full GPU GOP release, one FLR, PCI/GOP restore; no compute unlock\n"
+           "full GPU GOP release, one FLR, PCI/GOP restore; no compute unlock\n"
 #endif
 #elif defined(GC_LEAF_ONLY)
-          "single text member Stop/Supported/Start; no GPU GOP release, exclusive access, unlock "
-          "or FLR\n"
+           "single text member Stop/Supported/Start; no GPU GOP release, exclusive access, unlock "
+           "or FLR\n"
 #else
-          "detach/reconnect; no unlock/FLR/direct GPU writes linked; driver Stop/Start may write "
-          "hardware\n"
+           "detach/reconnect; no unlock/FLR/direct GPU writes linked; driver Stop/Start may write "
+           "hardware\n"
 #endif
 #endif
-          )) {
+           )) {
     status = EFI_DEVICE_ERROR;
     goto finish;
   }
@@ -421,8 +580,18 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *table) {
   }
   if (EFI_ERROR(status)) goto finish;
 #ifdef GU_SSD_EXPERIMENT
+#ifdef GC_LENOVO_CYCLE
+#ifdef GC_LENOVO_UNLOCK
+  status = Say(L"One-time real unlock. Reports: RTX-UNLOCK.\r\n");
+#else
+  status = Say(L"One-time display recovery test. Reports: RTX-CYCLE.\r\n");
+#endif
+#elif defined(GC_LENOVO_DGPU_DIAG)
+  status = Say(L"Read-only display diagnostic. Reports: RTX-DIAG.\r\n");
+#else
   status = Say(Quiet ? L"Boot source accepted. Logging OFF (no DEBUG.ON).\r\n"
                      : L"Boot source accepted. Logging ON (DEBUG.ON found).\r\n");
+#endif
   if (EFI_ERROR(status)) goto finish;
 #endif
   UINT8 secure = 0xff;
@@ -459,7 +628,101 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *table) {
     }
   }
 #endif
-#ifdef GC_TREE_ONLY
+#ifdef GC_LENOVO_CYCLE
+  stage = "lenovo-cycle-prepare";
+  status = table->BootServices->AllocatePool(EfiLoaderData, sizeof(*approved), (VOID **)&approved);
+  if (status != EFI_SUCCESS || !approved) {
+    status = EFI_OUT_OF_RESOURCES;
+    goto finish;
+  }
+  status = LcPrepare(&context, approved);
+  if (EFI_ERROR(status)) goto finish;
+#ifdef GC_LENOVO_UNLOCK
+  stage = "unlock-preflight";
+  status = GxPrepare(&context);
+  if (EFI_ERROR(status)) goto finish;
+#endif
+  stage = "windows-preflight";
+  status = GwPrepare(&context, &windows);
+  if (status != EFI_SUCCESS) goto finish;
+  stage = "cycle-start-gate";
+  status = Approve();
+  if (EFI_ERROR(status)) goto finish;
+  if (!Log(
+#ifdef GC_LENOVO_UNLOCK
+#ifdef GC_LENOVO_AUTOSTART
+          "AUTO_START: integrated Lenovo display release, real unlock and recovery\n"
+#else
+          "MANUAL_U confirmed; integrated Lenovo display release, real unlock and recovery\n"
+#endif
+#else
+          "MANUAL_U confirmed; one Lenovo display cycle; unlock=0 flr=0\n"
+#endif
+          )) {
+    status = EFI_DEVICE_ERROR;
+    goto finish;
+  }
+#ifdef GC_LENOVO_UNLOCK
+  if (GxAlreadyApplied()) {
+    status = GxObserve(&context, "already-applied");
+    if (EFI_ERROR(status) || EFI_ERROR(GxFinish()) || !Log("PATCH_SKIP: SS0 already applied\n"))
+      goto stop;
+    status = GwStart(&context, &windows, &Report, GxSafe() && !LogFailed);
+    goto stop;
+  }
+#endif
+  stage = "lenovo-cycle";
+  status = LcRun(&context, approved, &result);
+#ifdef GC_LENOVO_WINDOWS_TAKEOVER
+  if (result.windows_ready) {
+    if (EFI_ERROR(status) || !result.unlock_verified || !GxSafe() || LogFailed) goto stop;
+    status = GxObserve(&context, "before-windows");
+    if (EFI_ERROR(status)) goto stop;
+    status = GxFinish();
+    if (EFI_ERROR(status) || !Log("LC_WINDOWS_HANDOFF unlock=1 firmware_display_restored=0 "
+                                  "windows_driver_takeover=1 no_console_calls=1\n"))
+      goto stop;
+    status = GwStart(&context, &windows, &Report, GxSafe() && !LogFailed);
+    RecordWindowsReturn(image, status);
+    goto stop;
+  }
+#endif
+  if (result.touched && (EFI_ERROR(status) || !result.restored || LogFailed)) goto stop;
+  if (EFI_ERROR(status)) goto finish;
+  if (!result.touched || !result.restored) {
+    status = EFI_COMPROMISED_DATA;
+    goto finish;
+  }
+#ifdef GC_LENOVO_UNLOCK
+  if (!GxSafe()) goto stop;
+  status =
+      Say(result.unlock_verified
+              ? L"SS0 unlock verified. Display restored. Starting Windows.\r\n"
+              : L"Isolation declined. Display restored; unlock skipped. Starting Windows.\r\n");
+  if (EFI_ERROR(status)) goto stop;
+  if (result.unlock_verified && EFI_ERROR(GxObserve(&context, "before-windows"))) goto stop;
+  status = GxFinish();
+  if (EFI_ERROR(status) ||
+      !Log("LC_WINDOWS_HANDOFF unlock=%u restored=%u\n", result.unlock_verified, result.restored))
+    goto stop;
+#else
+  status = Say(EFI_ERROR(result.isolated)
+                   ? L"Display restored. Isolation needs adaptation; no unlock attempted. Starting "
+                     L"Windows.\r\n"
+                   : L"Display driver cycle verified. Starting Windows without reboot.\r\n");
+  if (EFI_ERROR(status) ||
+      !Log("LC_WINDOWS_HANDOFF: display restored; isolation_qualified=%u unlock=0\n",
+           !EFI_ERROR(result.isolated)))
+    goto stop;
+#endif
+  status = GwStart(&context, &windows, &Report, !LogFailed);
+  goto stop;
+#elif defined(GC_TREE_ONLY)
+#ifdef GC_LENOVO_DGPU_DIAG
+  stage = "dgpu-capture-or-windows-return";
+  status = GdCaptureAndBoot(&context, &Report);
+  goto finish;
+#else
   stage = "ownership-tree";
   Say(L"Read-only ownership tree capture. No U key or driver detach is used.\r\n");
   status = GcReadTree(&context);
@@ -475,6 +738,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *table) {
       L"No drivers were detached. Returning to firmware in 20 seconds.\r\n");
   Table->BootServices->Stall(20000000);
   return EFI_SUCCESS;
+#endif
 #else
 #ifdef GC_FULL_FLR
   stage = "full-plan-allocation";
@@ -491,7 +755,11 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *table) {
 #ifdef GC_FULL_UNLOCK
   status = Say(
 #ifdef GC_PRODUCTION
+#ifdef GU_LENOVO_AUTOSTART
+      L"Checking board state and firmware assets before automatic unlock.\r\n"
+#else
       L"Checking board state and firmware assets. DEBUG.ON requires U before proceeding.\r\n"
+#endif
 #else
       L"Verifying captured board state and five firmware assets before U. Please wait.\r\n"
 #endif
@@ -504,6 +772,21 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *table) {
   if (!GxAlreadyApplied()) {
     stage = "full-prepare";
     status = GfPrepare(&context, approved);
+#ifdef GC_PREFLIGHT_ONLY
+    if (EFI_ERROR(status)) {
+      EFI_STATUS blocked = status;
+      stage = "owner-diagnostic";
+      EFI_STATUS diagnostic = GdCollectOwnerDiagnostic(&context);
+      if (!Log("OWNER_DIAGNOSTIC_RESULT blocked_gate=%#llx capture=%#llx unlock_disabled=1\n",
+               (unsigned long long)blocked, (unsigned long long)diagnostic))
+        diagnostic = EFI_DEVICE_ERROR;
+      if (!EFI_ERROR(diagnostic))
+        Say(L"\r\nOWNER DIAGNOSTIC COMPLETE. Original preflight gate remains blocked.\r\n"
+            L"No driver released and no unlock executed. Save logs and power off.\r\n");
+      status = EFI_ERROR(diagnostic) ? diagnostic : blocked;
+      goto finish;
+    }
+#endif
     if (EFI_ERROR(status)) goto finish;
   }
 #endif
@@ -512,6 +795,19 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *table) {
   stage = "windows-preflight";
   status = GwPrepare(&context, &windows);
   if (status != EFI_SUCCESS) goto finish;
+#endif
+#ifdef GC_PREFLIGHT_ONLY
+  /* This diagnostic build stops before manual approval, profile commit,
+     exclusive claim, firmware execution, FLR and Windows StartImage. */
+  stage = "preflight-only-complete";
+  if (!Log("PREFLIGHT_ONLY_PASS: all pre-U checks passed; unlock disabled in this build\n")) {
+    status = EFI_DEVICE_ERROR;
+    goto finish;
+  }
+  status = Say(L"\r\nLOCAL PREFLIGHT COMPLETE. No unlock has run.\r\n"
+               L"U is disabled in this diagnostic build. Save logs and power off.\r\n");
+  if (!EFI_ERROR(status)) status = EFI_ABORTED;
+  goto finish;
 #endif
   stage = "start-gate";
   status = Approve();
@@ -531,6 +827,9 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE image, EFI_SYSTEM_TABLE *table) {
   manual = !Quiet;
 #ifdef GU_INDEPENDENT_DISPLAY
   manual = TRUE;
+#endif
+#ifdef GU_LENOVO_AUTOSTART
+  manual = !AutomaticApproval;
 #endif
 #ifdef GU_AUTO_PROFILE
   manual = manual || ProfileChanged;
@@ -724,7 +1023,7 @@ finish:
   if (LogFailed) status = EFI_DEVICE_ERROR;
   status = CloseFile(Report, status);
   Report = NULL;
-#ifdef GC_FULL_FLR
+#if defined(GC_FULL_FLR) || defined(GC_LENOVO_CYCLE)
   if (approved && EFI_ERROR(table->BootServices->FreePool(approved))) status = EFI_DEVICE_ERROR;
 #endif
   ShowFailure(stage, status);

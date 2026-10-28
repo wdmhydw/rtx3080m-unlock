@@ -35,6 +35,7 @@ def main():
     p.add_argument("--prom", type=Path)
     p.add_argument("--assets", type=Path)
     p.add_argument("--profile", type=Path)
+    p.add_argument("--lenovo-core", action="store_true", help="Captured Lenovo ROM geometry; core transaction only (the existing app fixture models ASUS).")
     args = p.parse_args()
     if os.name != "nt":
         p.error("This minimal host runner currently requires Windows + LLVM")
@@ -77,8 +78,13 @@ def main():
         specific = [*shared, "-DGU_INDEPENDENT_DISPLAY", "-DGU_TARGET_PCI_ID=0x249c10deU",
                     "-DGU_BOARD_ID=0x249c10deU", "-DGU_BOARD_SUBSYSTEM=0x16021043U",
                     "-DGU_BOARD_CHIP=0xb74000a1U", "-DGU_FB_MIB=0x4000U", "-DGU_BAR_SIZE=0x1000000ULL"]
+        if args.lenovo_core:
+            specific.append("-DTEST_LENOVO_PROM")
         suite("ga104-core", ["src/unlock/tests/test_ga104_simulation.c", *core], specific,
               [args.prom.resolve(), args.assets.resolve()])
+        if args.lenovo_core:
+            print("Lenovo ROM core checks complete; ASUS app fixture not selected.")
+            return
         production = [*shared, "-DGU_INDEPENDENT_DISPLAY", "-DGU_RUNTIME_PROFILE_BUILD",
                       "-DGU_SSD_EXPERIMENT", "-DGU_GOP_EXPERIMENT", "-DGC_FULL_UNLOCK"]
         suite("ga104-chain", ["src/unlock/tests/test_ga104_boot.c", "src/unlock/app.c",

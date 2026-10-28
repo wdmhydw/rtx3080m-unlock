@@ -32,6 +32,11 @@ typedef struct {
 typedef struct {
   BOOLEAN touched, restored;
   EFI_STATUS detach, isolated, claim, close, connect, verify;
+#ifdef GC_LENOVO_UNLOCK
+  BOOLEAN unlock_attempted, unlock_verified;
+  BOOLEAN windows_ready;
+  EFI_STATUS patch, observe_before, observe_after;
+#endif
 } GC_RESULT;
 EFI_STATUS GcCapture(GC_CONTEXT *context, GC_SNAPSHOT *snapshot);
 BOOLEAN GcReady(const GC_SNAPSHOT *snapshot);

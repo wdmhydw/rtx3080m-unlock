@@ -3,10 +3,25 @@ import { resolve } from "node:path"
 import Bun, { $ } from "bun"
 
 const root = resolve(import.meta.dir, "..")
-if (process.argv.length > 2) {
-  throw new Error("Usage: bun run build (builds v20-quiet-profile EFI)")
+const preflightOnly =
+  process.argv.length === 3 && process.argv[2] === "--preflight-only"
+const autoStart =
+  process.argv.length === 3 && process.argv[2] === "--lenovo-autostart"
+const singleOwner =
+  autoStart ||
+  (process.argv.length === 3 && process.argv[2] === "--lenovo-single-owner")
+if (process.argv.length > 2 && !preflightOnly && !singleOwner) {
+  throw new Error(
+    "Usage: bun tools/build.ts [--preflight-only | --lenovo-single-owner | --lenovo-autostart]",
+  )
 }
-const output = "build/efi"
+const output = preflightOnly
+  ? "build/preflight-efi"
+  : autoStart
+    ? "build/lenovo-auto-efi"
+    : singleOwner
+      ? "build/lenovo-efi"
+      : "build/efi"
 const toolOptions = process.env.LLVM_BIN
   ? { PATH: process.env.LLVM_BIN }
   : undefined
@@ -43,8 +58,13 @@ const sources = [
   "src/probe/probe_profile",
   "src/unlock/profile_probe",
   "src/gop/windows",
+  ...(preflightOnly ? ["src/gop/tree", "src/gop/owner_diagnostic"] : []),
+  ...(singleOwner ? ["src/unlock/single_owner"] : []),
 ]
 const flags = [
+  ...(preflightOnly ? ["-DGC_PREFLIGHT_ONLY", "-ffunction-sections"] : []),
+  ...(singleOwner ? ["-DGU_LENOVO_SINGLE_OWNER"] : []),
+  ...(autoStart ? ["-DGU_LENOVO_AUTOSTART"] : []),
   "-target",
   "x86_64-pc-windows-msvc",
   "-std=c11",
@@ -92,13 +112,57 @@ await $`${process.execPath} tools/verify_pe.ts ${output + "/BOOTX64.EFI"} ${outp
   root,
 )
 const map = await Bun.file(resolve(root, output, "BOOTX64.map")).text()
-for (const symbol of [
-  "GfRun",
-  "GuProfileCreate",
-  "GuProfileRefresh",
-  "GuProfileCommit",
-  "GwStart",
-]) {
-  assert(new RegExp(`\\b${symbol}\\b`).test(map), `Missing required code: ${symbol}`)
+for (const symbol of preflightOnly
+  ? [
+      "GuProfileCreate",
+      "GuProfileRefresh",
+      "GwPrepare",
+      "GfPrepare",
+      "GxPrepare",
+      "GdCollectOwnerDiagnostic",
+      "GcReadTree",
+      "GuFindReleaseOwner",
+    ]
+  : [
+      "GfRun",
+      "GuProfileCreate",
+      "GuProfileRefresh",
+      "GuProfileCommit",
+      "GwStart",
+    ]) {
+  assert(
+    new RegExp(`\\b${symbol}\\b`).test(map),
+    `Missing required code: ${symbol}`,
+  )
 }
-console.log(`Built v22-independent-ss0: ${resolve(root, output, "BOOTX64.EFI")}`)
+if (preflightOnly) {
+  for (const symbol of [
+    "GfRun",
+    "GwStart",
+    "GuProfileCommit",
+    "GxIndependentRun",
+    "GxPatch",
+    "gpu_unlock_610_unlock",
+    "GuFlr",
+  ]) {
+    assert(
+      !new RegExp(`\\b${symbol}\\b`).test(map),
+      `Unexpected execution code: ${symbol}`,
+    )
+  }
+}
+if (singleOwner) {
+  for (const symbol of [
+    "GuSingleOwnerPrepare",
+    "GuSingleOwnerRelease",
+    "GxIndependentRun",
+  ]) {
+    assert(
+      new RegExp(`\\b${symbol}\\b`).test(map),
+      `Missing local owner code: ${symbol}`,
+    )
+  }
+}
+console.log(
+  `Built ${preflightOnly ? "local-lenovo-owner-preflight-2 (unlock disabled)" : autoStart ? "local-lenovo-autostart-4 (automatic with unchanged profile)" : singleOwner ? "local-lenovo-single-owner-3 (physical U required)" : "v22-independent-ss0"}: ${resolve(root, output, "BOOTX64.EFI")}`,
+)

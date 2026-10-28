@@ -174,10 +174,19 @@ static UINT8 *dma_pointer(UINT64 address, UINTN bytes) {
 static VOID check_fwsec_image(void) {
   UINT64 last_source =
       ((UINT64)registers[(GSP + 0x110) / 4] << 8) | ((UINT64)registers[(GSP + 0x128) / 4] << 40);
+#ifdef TEST_LENOVO_PROM
+  /* Captured Lenovo 82K6 ROM: descriptor 0x44d34, image 0x451e0,
+     data offset 0xe200, signature array 0x44d60; fuse version 2. */
+  CHECK(last_source >= 0xe200);
+  UINT8 *image = dma_pointer(last_source - 0xe200, 0xea00);
+  CHECK(!memcmp(gsp_dmem, image + 0xe200, sizeof(gsp_dmem)));
+  CHECK(!memcmp(gsp_dmem + 0x5a4, prom + 0x44d60 + 0x300, 384));
+#else
   CHECK(last_source >= 0xdf00);
   UINT8 *image = dma_pointer(last_source - 0xdf00, 0xe700);
   CHECK(!memcmp(gsp_dmem, image + 0xdf00, sizeof(gsp_dmem)));
   CHECK(!memcmp(gsp_dmem + 0x5a4, prom + 0x43060 + 0x300, 384));
+#endif
   CHECK(le32(gsp_dmem + 0x7c0 + 32) == 0x3ffe00);
   CHECK(le32(gsp_dmem + 0x7c0 + 36) == 0x100);
 }

@@ -1,5 +1,7 @@
 # ROG RTX 3080M UEFI 算力解锁
 
+> **联想实验分支：** 本机独显直连适配、单机实测及限制见 [Lenovo 82K6 实验记录](LENOVO-82K6-EXPERIMENT.md)。下方原项目 ASUS 操作步骤并非联想实验的部署说明。
+
 在 Windows 启动前解除部分 FP16/BF16 张量计算吞吐限制。目前只在一台 **ROG Strix G533QS、5800H、RTX 3080 Laptop 16GB** 上完成真机验证。
 
 | 项目 | 解锁前记录 | 解锁后 | 变化 |
